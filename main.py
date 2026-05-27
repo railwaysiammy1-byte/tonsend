@@ -19,11 +19,11 @@ app = FastAPI(title="TON Full Payment Gateway")
 # =========================================================
 ton_client = None
 
-# Prevent concurrent seqno conflicts
+# Prevent seqno conflicts
 wallet_lock = asyncio.Lock()
 
 # =========================================================
-# STARTUP / SHUTDOWN
+# STARTUP
 # =========================================================
 @app.on_event("startup")
 async def startup():
@@ -39,6 +39,9 @@ async def startup():
     print("TON client connected")
 
 
+# =========================================================
+# SHUTDOWN
+# =========================================================
 @app.on_event("shutdown")
 async def shutdown():
 
@@ -48,10 +51,8 @@ async def shutdown():
         if ton_client:
             await ton_client.close_all()
 
-    except Exception:
-        pass
-
-    print("TON client closed")
+    except Exception as e:
+        print("Shutdown error:", e)
 
 
 # =========================================================
@@ -59,6 +60,7 @@ async def shutdown():
 # =========================================================
 @app.get("/")
 async def root():
+
     return {
         "status": "running",
         "service": "TON Payment Gateway"
@@ -66,7 +68,7 @@ async def root():
 
 
 # =========================================================
-# BSC PANCAKESWAP PRICE ORACLE
+# BSC PRICE ORACLE
 # =========================================================
 bsc_rpc = "https://bsc-dataseed.binance.org/"
 
@@ -111,7 +113,7 @@ def pancake_price():
     price = reserve_usdt / reserve_ton
 
     if price <= 0:
-        raise Exception("Invalid Pancake price")
+        raise Exception("Invalid price")
 
     return float(price)
 
@@ -132,14 +134,12 @@ def diadata_price():
 
 def get_ton_price():
 
-    # PancakeSwap
     try:
         return pancake_price()
 
     except Exception:
         pass
 
-    # DIA fallback
     try:
         return diadata_price()
 
@@ -178,7 +178,7 @@ def response(ok, message, data=None, code=200):
 
 
 # =========================================================
-# TX TRACKER
+# TRACK TX
 # =========================================================
 async def track_tx(client, wallet, old_seqno, timeout=150):
 
@@ -187,6 +187,7 @@ async def track_tx(client, wallet, old_seqno, timeout=150):
     while True:
 
         try:
+
             seqno = await wallet.get_seqno()
 
             if seqno > old_seqno:
@@ -199,8 +200,9 @@ async def track_tx(client, wallet, old_seqno, timeout=150):
                 if txs:
                     return txs[0].cell.hash.hex()
 
-        except Exception:
-            pass
+        except Exception as e:
+
+            print("Track tx error:", e)
 
         if time.time() - start > timeout:
             return None
@@ -209,7 +211,7 @@ async def track_tx(client, wallet, old_seqno, timeout=150):
 
 
 # =========================================================
-# MAIN PAYMENT FUNCTION
+# MAIN PAYMENT
 # =========================================================
 async def process_payment(req: SendRequest):
 
@@ -229,7 +231,7 @@ async def process_payment(req: SendRequest):
     # =====================================================
     # MEMO
     # =====================================================
-    memo_value = "12345"
+    memo_value = "PAYMENT"
 
     if req.memo and req.memo.strip():
         memo_value = req.memo.strip()
@@ -256,7 +258,7 @@ async def process_payment(req: SendRequest):
     )
 
     # =====================================================
-    # WALLET LOAD
+    # LOAD WALLET
     # =====================================================
     try:
 
@@ -288,6 +290,8 @@ async def process_payment(req: SendRequest):
 
     amount_usd = amount_ton * ton_price
 
+    required = int(amount_ton * 1e9)
+
     # =====================================================
     # BALANCE
     # =====================================================
@@ -308,10 +312,8 @@ async def process_payment(req: SendRequest):
 
     balance_ton = before_balance / 1e9
 
-    required = int(amount_ton * 1e9)
-
     # =====================================================
-    # INSUFFICIENT
+    # INSUFFICIENT BALANCE
     # =====================================================
     if before_balance < required:
 
@@ -351,6 +353,9 @@ async def process_payment(req: SendRequest):
     # =====================================================
     async with wallet_lock:
 
+        # =================================================
+        # GET SEQNO
+        # =================================================
         try:
 
             old_seqno = await wallet.get_seqno()
@@ -367,7 +372,7 @@ async def process_payment(req: SendRequest):
             )
 
         # =================================================
-        # SEND TX
+        # SEND TRANSACTION
         # =================================================
         try:
 
@@ -389,7 +394,7 @@ async def process_payment(req: SendRequest):
             )
 
         # =================================================
-        # TRACK TX
+        # TRACK TRANSACTION
         # =================================================
         txid = await track_tx(
             client,
@@ -405,7 +410,9 @@ async def process_payment(req: SendRequest):
 
         after_balance = await wallet.get_balance()
 
-    except Exception:
+    except Exception as e:
+
+        print("Balance fetch after tx failed:", e)
 
         after_balance = before_balance - required
 
@@ -426,7 +433,7 @@ async def process_payment(req: SendRequest):
     fee_usd = fee_ton * ton_price
 
     # =====================================================
-    # SUCCESS
+    # SUCCESS RESPONSE
     # =====================================================
     return response(
         True,
@@ -502,287 +509,4 @@ async def process_payment(req: SendRequest):
 @app.post("/send")
 async def send(req: SendRequest):
 
-    return await process_payment(req)
-    except Exception:
-        pass
-
-    try:
-        price = diadata_price()
-
-        if price > 0:
-            return price
-
-    except Exception:
-        pass
-
-    return 0.0
-
-
-# =========================================================
-# REQUEST MODEL
-# =========================================================
-class SendRequest(BaseModel):
-    mnemonic: list[str]
-    to_address: str
-    amount_ton: float
-    memo: str | None = None
-
-
-# =========================================================
-# RESPONSE WRAPPER
-# =========================================================
-def response(ok, message, data=None, code=200):
-    return {
-        "ok": ok,
-        "message": message,
-        "status_code": code,
-        "timestamp": int(time.time()),
-        "data": data
-    }
-
-
-# =========================================================
-# TX TRACKER
-# =========================================================
-async def track_tx(client, wallet, old_seqno, timeout=150):
-    start = time.time()
-
-    while True:
-        try:
-            seqno = await wallet.get_seqno()
-
-            if seqno > old_seqno:
-                txs = await client.get_transactions(wallet.address, count=10)
-
-                if txs:
-                    return txs[0].cell.hash.hex()
-
-        except Exception:
-            pass
-
-        if time.time() - start > timeout:
-            return None
-
-        await asyncio.sleep(5)
-
-
-# =========================================================
-# MAIN PAYMENT FUNCTION
-# =========================================================
-async def process_payment(req: SendRequest):
-
-    body = None
-    memo_value = "PAYMENT"
-
-    if req.memo and req.memo.strip():
-        memo_value = req.memo.strip()
-
-    memo_bytes = memo_value.encode("utf-8")
-
-    if len(memo_bytes) > 123:
-        return response(
-            False,
-            "Memo too long",
-            {
-                "memo_bytes": len(memo_bytes),
-                "max_bytes": 123
-            },
-            400
-        )
-
-    body = (
-        begin_cell()
-        .store_uint(0, 32)
-        .store_string(memo_value)
-        .end_cell()
-    )
-
-    client = LiteBalancer.from_mainnet_config(trust_level=2)
-
-    try:
-        await client.start_up()
-
-        # =====================================================
-        # WALLET LOAD
-        # =====================================================
-        try:
-            wallet = await WalletV5R1.from_mnemonic(
-                provider=client,
-                mnemonics=req.mnemonic,
-                network_global_id=-239
-            )
-
-        except Exception as e:
-            return response(
-                False,
-                "Invalid mnemonic / seed phrase",
-                {"error": str(e)},
-                400
-            )
-
-        wallet_addr = str(wallet.address)
-
-        # =====================================================
-        # PRICE
-        # =====================================================
-        ton_price = get_ton_price()
-
-        amount_ton = float(req.amount_ton)
-        amount_usd = amount_ton * ton_price
-
-        # =====================================================
-        # BALANCE
-        # =====================================================
-        try:
-            before_balance = await wallet.get_balance()
-
-        except Exception as e:
-            return response(
-                False,
-                "Balance fetch failed",
-                {"error": str(e)},
-                502
-            )
-
-        balance_ton = before_balance / 1e9
-
-        required = int(amount_ton * 1e9)
-
-        if before_balance < required:
-            return response(
-                False,
-                "Insufficient balance",
-                {
-                    "wallet": wallet_addr,
-                    "balance_ton": round(balance_ton, 9),
-                    "balance_usd": round(balance_ton * ton_price, 6),
-
-                    "required_ton": round(amount_ton, 9),
-                    "required_usd": round(amount_usd, 6),
-
-                    "ton_price_usd": round(ton_price, 6)
-                },
-                402
-            )
-
-        # =====================================================
-        # SEQNO
-        # =====================================================
-        try:
-            old_seqno = await wallet.get_seqno()
-
-        except Exception as e:
-            return response(
-                False,
-                "Seqno fetch failed",
-                {"error": str(e)},
-                502
-            )
-
-        # =====================================================
-        # SEND TX
-        # =====================================================
-        try:
-            await wallet.transfer(
-                destination=req.to_address,
-                amount=required,
-                body=body
-            )
-
-        except Exception as e:
-            return response(
-                False,
-                "Transaction failed",
-                {"error": str(e)},
-                500
-            )
-
-        # =====================================================
-        # TRACK TX
-        # =====================================================
-        txid = await track_tx(
-            client,
-            wallet,
-            old_seqno,
-            timeout=150
-        )
-
-        # =====================================================
-        # FINAL BALANCE
-        # =====================================================
-        after_balance = await wallet.get_balance()
-
-        after_balance_ton = after_balance / 1e9
-
-        # =====================================================
-        # FEES
-        # =====================================================
-        fee_ton = (
-            before_balance
-            - after_balance
-            - required
-        ) / 1e9
-
-        if fee_ton < 0:
-            fee_ton = 0
-
-        fee_usd = fee_ton * ton_price
-
-        # =====================================================
-        # SUCCESS RESPONSE
-        # =====================================================
-        return response(
-            True,
-            "Transaction completed",
-            {
-                "success": True,
-
-                "wallet": wallet_addr,
-                "to_address": req.to_address,
-
-                "memo": memo_value,
-
-                "txid": txid,
-                "hash_status": (
-                    "confirmed"
-                    if txid
-                    else "pending"
-                ),
-
-                "amount_ton": round(amount_ton, 9),
-                "amount_usd": round(amount_usd, 6),
-
-                "before_balance_ton": round(balance_ton, 9),
-                "before_balance_usd": round(balance_ton * ton_price, 6),
-
-                "after_balance_ton": round(after_balance_ton, 9),
-                "after_balance_usd": round(after_balance_ton * ton_price, 6),
-
-                "fee_ton": round(fee_ton, 9),
-                "fee_usd": round(fee_usd, 6),
-
-                "ton_price_usd": round(ton_price, 6)
-            }
-        )
-
-    except Exception as e:
-        return response(
-            False,
-            "Server error",
-            {"error": str(e)},
-            500
-        )
-
-    finally:
-        try:
-            await client.close_all()
-        except Exception:
-            pass
-
-
-# =========================================================
-# API ENDPOINT
-# =========================================================
-@app.post("/send")
-async def send(req: SendRequest):
     return await process_payment(req)
