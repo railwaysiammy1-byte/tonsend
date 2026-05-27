@@ -231,31 +231,33 @@ async def process_payment(req: SendRequest):
     # =====================================================
     # MEMO
     # =====================================================
-    memo_value = "PAYMENT"
+    body = None
+    memo_value = None
 
     if req.memo and req.memo.strip():
+
         memo_value = req.memo.strip()
 
-    memo_bytes = memo_value.encode("utf-8")
+        memo_bytes = memo_value.encode("utf-8")
 
-    if len(memo_bytes) > 123:
+        if len(memo_bytes) > 123:
 
-        return response(
-            False,
-            "Memo too long",
-            {
-                "memo_bytes": len(memo_bytes),
-                "max_bytes": 123
-            },
-            400
+            return response(
+                False,
+                "Memo too long",
+                {
+                    "memo_bytes": len(memo_bytes),
+                    "max_bytes": 123
+                },
+                400
+            )
+
+        body = (
+            begin_cell()
+            .store_uint(0, 32)
+            .store_string(memo_value)
+            .end_cell()
         )
-
-    body = (
-        begin_cell()
-        .store_uint(0, 32)
-        .store_string(memo_value)
-        .end_cell()
-    )
 
     # =====================================================
     # LOAD WALLET
