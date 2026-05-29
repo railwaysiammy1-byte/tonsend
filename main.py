@@ -8,7 +8,7 @@ from pydantic import BaseModel
 from web3 import Web3
 
 from pytoniq import LiteBalancer, WalletV5R1
-from pytoniq_core import begin_cell
+from pytoniq_core import begin_cell, Address
 
 # =========================================================
 # APP
@@ -189,9 +189,9 @@ async def track_tx(client, wallet, old_seqno, timeout=150):
 
         try:
 
-            # =============================================
+            # =================================================
             # UNDEPLOYED WALLET TRACKING
-            # =============================================
+            # =================================================
             if old_seqno == -1:
 
                 account_state = await client.get_account_state(
@@ -215,9 +215,9 @@ async def track_tx(client, wallet, old_seqno, timeout=150):
 
                 continue
 
-            # =============================================
+            # =================================================
             # NORMAL WALLET TRACKING
-            # =============================================
+            # =================================================
             seqno = await wallet.get_seqno()
 
             if seqno > old_seqno:
@@ -312,6 +312,26 @@ async def process_payment(req: SendRequest):
         )
 
     wallet_addr = str(wallet.address)
+
+    # =====================================================
+    # VALIDATE DESTINATION
+    # =====================================================
+    try:
+
+        destination_address = Address(
+            req.to_address
+        )
+
+    except Exception as e:
+
+        return response(
+            False,
+            "Invalid destination address",
+            {
+                "error": str(e)
+            },
+            400
+        )
 
     # =====================================================
     # PRICE
@@ -446,7 +466,7 @@ async def process_payment(req: SendRequest):
 
                 msgs=[
                     wallet.create_wallet_internal_message(
-                        destination=req.to_address,
+                        destination=destination_address,
                         value=required,
                         body=body
                     )
