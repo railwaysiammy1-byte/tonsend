@@ -1,4 +1,3 @@
-
 import asyncio
 import time
 import requests
@@ -7,8 +6,13 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 from web3 import Web3
 
-from pytoniq import LiteBalancer, WalletV5R1
-from pytoniq_core import begin_cell, Address
+from pytoniq import (
+    LiteBalancer,
+    WalletV5R1,
+    Address
+)
+
+from pytoniq_core import begin_cell
 
 # =========================================================
 # APP
@@ -49,10 +53,12 @@ async def shutdown():
     global ton_client
 
     try:
+
         if ton_client:
             await ton_client.close_all()
 
     except Exception as e:
+
         print("Shutdown error:", e)
 
 
@@ -64,7 +70,7 @@ async def root():
 
     return {
         "status": "running",
-        "service": "TON Payment Gateway"
+        "service": "TON Full Payment Gateway"
     }
 
 
@@ -76,7 +82,9 @@ bsc_rpc = "https://bsc-dataseed.binance.org/"
 web3 = Web3(
     Web3.HTTPProvider(
         bsc_rpc,
-        request_kwargs={"timeout": 15}
+        request_kwargs={
+            "timeout": 15
+        }
     )
 )
 
@@ -90,9 +98,18 @@ pool_abi = [
         "inputs": [],
         "name": "getReserves",
         "outputs": [
-            {"name": "_reserve0", "type": "uint112"},
-            {"name": "_reserve1", "type": "uint112"},
-            {"name": "_blockTimestampLast", "type": "uint32"}
+            {
+                "name": "_reserve0",
+                "type": "uint112"
+            },
+            {
+                "name": "_reserve1",
+                "type": "uint112"
+            },
+            {
+                "name": "_blockTimestampLast",
+                "type": "uint32"
+            }
         ],
         "type": "function"
     }
@@ -109,6 +126,7 @@ def pancake_price():
     reserves = contract.functions.getReserves().call()
 
     reserve_usdt = reserves[0] / (10 ** 18)
+
     reserve_ton = reserves[1] / (10 ** 9)
 
     price = reserve_usdt / reserve_ton
@@ -165,7 +183,7 @@ class SendRequest(BaseModel):
 
 
 # =========================================================
-# RESPONSE WRAPPER
+# RESPONSE
 # =========================================================
 def response(ok, message, data=None, code=200):
 
@@ -181,7 +199,12 @@ def response(ok, message, data=None, code=200):
 # =========================================================
 # TRACK TX
 # =========================================================
-async def track_tx(client, wallet, old_seqno, timeout=150):
+async def track_tx(
+    client,
+    wallet,
+    old_seqno,
+    timeout=150
+):
 
     start = time.time()
 
@@ -190,7 +213,7 @@ async def track_tx(client, wallet, old_seqno, timeout=150):
         try:
 
             # =================================================
-            # UNDEPLOYED WALLET TRACKING
+            # UNDEPLOYED WALLET
             # =================================================
             if old_seqno == -1:
 
@@ -209,6 +232,7 @@ async def track_tx(client, wallet, old_seqno, timeout=150):
                     )
 
                     if txs:
+
                         return txs[0].cell.hash.hex()
 
                 await asyncio.sleep(3)
@@ -216,7 +240,7 @@ async def track_tx(client, wallet, old_seqno, timeout=150):
                 continue
 
             # =================================================
-            # NORMAL WALLET TRACKING
+            # DEPLOYED WALLET
             # =================================================
             seqno = await wallet.get_seqno()
 
@@ -228,6 +252,7 @@ async def track_tx(client, wallet, old_seqno, timeout=150):
                 )
 
                 if txs:
+
                     return txs[0].cell.hash.hex()
 
         except Exception as e:
@@ -235,6 +260,7 @@ async def track_tx(client, wallet, old_seqno, timeout=150):
             print("Track tx error:", e)
 
         if time.time() - start > timeout:
+
             return None
 
         await asyncio.sleep(3)
@@ -262,6 +288,7 @@ async def process_payment(req: SendRequest):
     # MEMO
     # =====================================================
     body = None
+
     memo_value = None
 
     if req.memo and req.memo.strip():
@@ -314,7 +341,7 @@ async def process_payment(req: SendRequest):
     wallet_addr = str(wallet.address)
 
     # =====================================================
-    # VALIDATE DESTINATION
+    # DESTINATION ADDRESS
     # =====================================================
     try:
 
@@ -365,13 +392,10 @@ async def process_payment(req: SendRequest):
     balance_ton = before_balance / 1e9
 
     # =====================================================
-    # DEPLOYMENT FEE
+    # DEPLOYMENT CHECK
     # =====================================================
     deploy_fee = int(0.05 * 1e9)
 
-    # =====================================================
-    # CHECK DEPLOY STATUS
-    # =====================================================
     try:
 
         try:
@@ -407,6 +431,7 @@ async def process_payment(req: SendRequest):
     required_total = required
 
     if not wallet_active:
+
         required_total += deploy_fee
 
     # =====================================================
@@ -453,25 +478,29 @@ async def process_payment(req: SendRequest):
         )
 
     # =====================================================
-    # LOCKED TRANSFER
+    # SEND TX
     # =====================================================
     async with wallet_lock:
 
-        # =================================================
-        # SEND TRANSACTION
-        # =================================================
         try:
 
+            transfer_message = (
+                wallet.create_wallet_internal_message(
+                    destination=destination_address,
+                    value=int(required),
+                    body=body
+                )
+            )
+
+            # =================================================
+            # FIX OLD PYTONIQ
+            # =================================================
+            transfer_message.destination = (
+                destination_address
+            )
+
             await wallet.raw_transfer(
-
-                msgs=[
-                    wallet.create_wallet_internal_message(
-                        destination=destination_address,
-                        value=required,
-                        body=body
-                    )
-                ],
-
+                msgs=[transfer_message],
                 state_init=state_init
             )
 
@@ -487,7 +516,7 @@ async def process_payment(req: SendRequest):
             )
 
         # =================================================
-        # TRACK TRANSACTION
+        # TRACK TX
         # =================================================
         txid = await track_tx(
             client,
@@ -505,9 +534,14 @@ async def process_payment(req: SendRequest):
 
     except Exception as e:
 
-        print("Balance fetch after tx failed:", e)
+        print(
+            "Balance fetch after tx failed:",
+            e
+        )
 
-        after_balance = before_balance - required
+        after_balance = (
+            before_balance - required
+        )
 
     after_balance_ton = after_balance / 1e9
 
@@ -521,12 +555,13 @@ async def process_payment(req: SendRequest):
     ) / 1e9
 
     if fee_ton < 0:
+
         fee_ton = 0
 
     fee_usd = fee_ton * ton_price
 
     # =====================================================
-    # SUCCESS RESPONSE
+    # RESPONSE
     # =====================================================
     return response(
         True,
@@ -607,4 +642,3 @@ async def process_payment(req: SendRequest):
 async def send(req: SendRequest):
 
     return await process_payment(req)
-
