@@ -1,3 +1,4 @@
+
 import asyncio
 import time
 import requests
@@ -26,11 +27,12 @@ ton_client = None
 wallet_lock = asyncio.Lock()
 
 # =========================================================
-# TON SETTINGS
+# SETTINGS
 # =========================================================
 
-# deploy + tx + gas reserve
 AUTO_FEE_BUFFER_TON = 0.05
+
+DEPLOY_WAIT_SECONDS = 60
 
 # =========================================================
 # STARTUP
@@ -78,14 +80,14 @@ async def root():
 
     return {
         "ok": True,
-        "service": "TON Auto Deploy Gateway",
+        "service": "TON Payment Gateway",
         "status": "running",
         "timestamp": int(time.time())
     }
 
 
 # =========================================================
-# BSC PRICE ORACLE
+# PRICE ORACLE
 # =========================================================
 
 bsc_rpc = "https://bsc-dataseed.binance.org/"
@@ -93,9 +95,7 @@ bsc_rpc = "https://bsc-dataseed.binance.org/"
 web3 = Web3(
     Web3.HTTPProvider(
         bsc_rpc,
-        request_kwargs={
-            "timeout": 15
-        }
+        request_kwargs={"timeout": 15}
     )
 )
 
@@ -143,7 +143,7 @@ def pancake_price():
     price = reserve_usdt / reserve_ton
 
     if price <= 0:
-        raise Exception("Invalid pancake price")
+        raise Exception("Invalid TON price")
 
     return float(price)
 
@@ -180,7 +180,7 @@ def get_ton_price():
 
 
 # =========================================================
-# RESPONSE
+# RESPONSE WRAPPER
 # =========================================================
 
 def response(ok, message, data=None, code=200):
@@ -248,7 +248,7 @@ async def track_tx(client, wallet, old_seqno, timeout=150):
 
 
 # =========================================================
-# CHECK ACTIVE
+# CHECK WALLET ACTIVE
 # =========================================================
 
 async def is_wallet_active(wallet):
@@ -265,40 +265,75 @@ async def is_wallet_active(wallet):
 
 
 # =========================================================
-# AUTO DEPLOY
+# AUTO DEPLOY WALLET
 # =========================================================
 
 async def auto_deploy_wallet(wallet):
 
-    active = await is_wallet_active(wallet)
+    # -----------------------------------------------------
+    # already deployed
+    # -----------------------------------------------------
 
-    if active:
+    try:
+
+        seqno = await wallet.get_seqno()
 
         return {
             "success": True,
             "deployed": False,
+            "seqno": seqno,
             "message": "Wallet already active"
         }
 
+    except Exception:
+
+        pass
+
+    # -----------------------------------------------------
+    # create deploy message
+    # -----------------------------------------------------
+
     try:
 
-        # deploy by self transfer
-        await wallet.transfer(
-            destination=wallet.address,
-            amount=int(0.01 * 1e9),
+        deploy = wallet.create_external_message(
+            dest=wallet.address,
+            state_init=wallet.state_init,
             body=None
         )
+
+        boc = deploy.serialize().to_boc()
 
     except Exception as e:
 
         return {
             "success": False,
-            "message": "Deploy transaction failed",
+            "message": "Create deploy message failed",
             "error": str(e)
         }
 
-    # wait active
-    for _ in range(30):
+    # -----------------------------------------------------
+    # send deploy message
+    # -----------------------------------------------------
+
+    try:
+
+        await wallet.provider.raw_send_message(boc)
+
+    except Exception as e:
+
+        return {
+            "success": False,
+            "message": "Broadcast deploy failed",
+            "error": str(e)
+        }
+
+    # -----------------------------------------------------
+    # wait until active
+    # -----------------------------------------------------
+
+    start = time.time()
+
+    while True:
 
         try:
 
@@ -313,16 +348,20 @@ async def auto_deploy_wallet(wallet):
 
         except Exception:
 
-            await asyncio.sleep(2)
+            pass
 
-    return {
-        "success": False,
-        "message": "Wallet deploy timeout"
-    }
+        if time.time() - start > DEPLOY_WAIT_SECONDS:
+
+            return {
+                "success": False,
+                "message": "Wallet deploy timeout"
+            }
+
+        await asyncio.sleep(2)
 
 
 # =========================================================
-# MAIN PAYMENT
+# MAIN PAYMENT PROCESS
 # =========================================================
 
 async def process_payment(req: SendRequest):
@@ -399,14 +438,10 @@ async def process_payment(req: SendRequest):
     wallet_addr = str(wallet.address)
 
     # =====================================================
-    # PRICE
+    # TON PRICE
     # =====================================================
 
     ton_price = get_ton_price()
-
-    requested_amount = float(req.amount_ton)
-
-    requested_nano = int(requested_amount * 1e9)
 
     # =====================================================
     # BALANCE
@@ -430,33 +465,45 @@ async def process_payment(req: SendRequest):
     balance_ton = before_balance / 1e9
 
     # =====================================================
-    # AUTO ADJUST FEES
+    # AUTO BALANCE ADJUST
     # =====================================================
+
+    requested_nano = int(req.amount_ton * 1e9)
 
     reserve_nano = int(AUTO_FEE_BUFFER_TON * 1e9)
 
-    sendable = before_balance - reserve_nano
+    sendable_nano = before_balance - reserve_nano
 
-    if sendable <= 0:
+    if sendable_nano <= 0:
 
         return response(
             False,
-            "Insufficient balance for deploy and fees",
+            "Insufficient balance",
             {
                 "wallet": wallet_addr,
                 "balance_ton": round(balance_ton, 9),
-                "required_fee_buffer_ton": AUTO_FEE_BUFFER_TON
+                "required_reserve_ton": AUTO_FEE_BUFFER_TON
             },
             402
         )
 
-    # auto adjust amount
     actual_send_nano = min(
         requested_nano,
-        sendable
+        sendable_nano
     )
 
     actual_send_ton = actual_send_nano / 1e9
+
+    if actual_send_nano <= 0:
+
+        return response(
+            False,
+            "Nothing to send",
+            {
+                "wallet": wallet_addr
+            },
+            400
+        )
 
     # =====================================================
     # LOCK
@@ -491,7 +538,7 @@ async def process_payment(req: SendRequest):
 
             return response(
                 False,
-                "Seqno fetch failed",
+                "Seqno fetch failed after deploy",
                 {
                     "error": str(e)
                 },
@@ -499,7 +546,7 @@ async def process_payment(req: SendRequest):
             )
 
         # =================================================
-        # SEND TX
+        # SEND TRANSACTION
         # =================================================
 
         try:
@@ -532,7 +579,7 @@ async def process_payment(req: SendRequest):
         )
 
     # =====================================================
-    # FINAL BALANCE
+    # AFTER BALANCE
     # =====================================================
 
     try:
@@ -545,6 +592,8 @@ async def process_payment(req: SendRequest):
             before_balance
             - actual_send_nano
         )
+
+    after_balance_ton = after_balance / 1e9
 
     # =====================================================
     # FEES
@@ -562,13 +611,15 @@ async def process_payment(req: SendRequest):
     fee_ton = fee_nano / 1e9
 
     # =====================================================
-    # SUCCESS
+    # SUCCESS RESPONSE
     # =====================================================
 
     return response(
         True,
         "Transaction completed",
         {
+            "success": True,
+
             "wallet": wallet_addr,
 
             "to_address": req.to_address,
@@ -583,8 +634,10 @@ async def process_payment(req: SendRequest):
                 else "pending"
             ),
 
+            "deploy_checked": True,
+
             "requested_amount_ton": round(
-                requested_amount,
+                req.amount_ton,
                 9
             ),
 
@@ -599,7 +652,7 @@ async def process_payment(req: SendRequest):
             ),
 
             "after_balance_ton": round(
-                after_balance / 1e9,
+                after_balance_ton,
                 9
             ),
 
@@ -616,15 +669,13 @@ async def process_payment(req: SendRequest):
             "estimated_sent_usd": round(
                 actual_send_ton * ton_price,
                 6
-            ),
-
-            "deploy_checked": True
+            )
         }
     )
 
 
 # =========================================================
-# API
+# API ENDPOINT
 # =========================================================
 
 @app.post("/send")
