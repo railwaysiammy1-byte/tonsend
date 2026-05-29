@@ -1,4 +1,4 @@
-```python
+
 import asyncio
 import time
 import requests
@@ -587,4 +587,4 @@ async def process_payment(req: SendRequest):
 async def send(req: SendRequest):
 
     return await process_payment(req)
-```
+
