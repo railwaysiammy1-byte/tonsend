@@ -2,7 +2,8 @@ fastapi
 uvicorn
 requests
 web3
-pytoniq
+ton-core
+tonutils
 pytoniq-core
 pydantic
-
+aiohttp
