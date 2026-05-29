@@ -1,5 +1,4 @@
-
-import asyncio
+     import asyncio
 import time
 import requests
 
@@ -80,7 +79,7 @@ async def root():
 
     return {
         "ok": True,
-        "service": "TON Payment Gateway",
+        "service": "TON Auto Deploy Gateway",
         "status": "running",
         "timestamp": int(time.time())
     }
@@ -248,32 +247,12 @@ async def track_tx(client, wallet, old_seqno, timeout=150):
 
 
 # =========================================================
-# CHECK WALLET ACTIVE
-# =========================================================
-
-async def is_wallet_active(wallet):
-
-    try:
-
-        await wallet.get_seqno()
-
-        return True
-
-    except Exception:
-
-        return False
-
-
-# =========================================================
 # AUTO DEPLOY WALLET
 # =========================================================
 
 async def auto_deploy_wallet(wallet):
 
-    # -----------------------------------------------------
-    # already deployed
-    # -----------------------------------------------------
-
+    # already active
     try:
 
         seqno = await wallet.get_seqno()
@@ -289,48 +268,23 @@ async def auto_deploy_wallet(wallet):
 
         pass
 
-    # -----------------------------------------------------
-    # create deploy message
-    # -----------------------------------------------------
-
+    # raw deploy
     try:
 
-        deploy = wallet.create_external_message(
-            dest=wallet.address,
-            state_init=wallet.state_init,
-            body=None
+        await wallet.raw_transfer(
+            msgs=[],
+            seqno=0
         )
 
-        boc = deploy.serialize().to_boc()
-
     except Exception as e:
 
         return {
             "success": False,
-            "message": "Create deploy message failed",
+            "message": "Raw deploy failed",
             "error": str(e)
         }
 
-    # -----------------------------------------------------
-    # send deploy message
-    # -----------------------------------------------------
-
-    try:
-
-        await wallet.provider.raw_send_message(boc)
-
-    except Exception as e:
-
-        return {
-            "success": False,
-            "message": "Broadcast deploy failed",
-            "error": str(e)
-        }
-
-    # -----------------------------------------------------
-    # wait until active
-    # -----------------------------------------------------
-
+    # wait active
     start = time.time()
 
     while True:
@@ -361,7 +315,7 @@ async def auto_deploy_wallet(wallet):
 
 
 # =========================================================
-# MAIN PAYMENT PROCESS
+# MAIN PAYMENT
 # =========================================================
 
 async def process_payment(req: SendRequest):
@@ -438,7 +392,7 @@ async def process_payment(req: SendRequest):
     wallet_addr = str(wallet.address)
 
     # =====================================================
-    # TON PRICE
+    # PRICE
     # =====================================================
 
     ton_price = get_ton_price()
@@ -494,27 +448,13 @@ async def process_payment(req: SendRequest):
 
     actual_send_ton = actual_send_nano / 1e9
 
-    if actual_send_nano <= 0:
-
-        return response(
-            False,
-            "Nothing to send",
-            {
-                "wallet": wallet_addr
-            },
-            400
-        )
-
     # =====================================================
     # LOCK
     # =====================================================
 
     async with wallet_lock:
 
-        # =================================================
-        # AUTO DEPLOY
-        # =================================================
-
+        # auto deploy
         deploy_result = await auto_deploy_wallet(wallet)
 
         if not deploy_result["success"]:
@@ -526,10 +466,7 @@ async def process_payment(req: SendRequest):
                 500
             )
 
-        # =================================================
-        # GET SEQNO
-        # =================================================
-
+        # get seqno
         try:
 
             old_seqno = await wallet.get_seqno()
@@ -545,10 +482,7 @@ async def process_payment(req: SendRequest):
                 502
             )
 
-        # =================================================
-        # SEND TRANSACTION
-        # =================================================
-
+        # send transaction
         try:
 
             await wallet.transfer(
@@ -568,10 +502,7 @@ async def process_payment(req: SendRequest):
                 500
             )
 
-        # =================================================
-        # TRACK TX
-        # =================================================
-
+        # track tx
         txid = await track_tx(
             client,
             wallet,
@@ -619,53 +550,40 @@ async def process_payment(req: SendRequest):
         "Transaction completed",
         {
             "success": True,
-
             "wallet": wallet_addr,
-
             "to_address": req.to_address,
-
             "memo": memo_value,
-
             "txid": txid,
-
             "hash_status": (
                 "confirmed"
                 if txid
                 else "pending"
             ),
-
             "deploy_checked": True,
-
             "requested_amount_ton": round(
                 req.amount_ton,
                 9
             ),
-
             "actual_sent_ton": round(
                 actual_send_ton,
                 9
             ),
-
             "before_balance_ton": round(
                 balance_ton,
                 9
             ),
-
             "after_balance_ton": round(
                 after_balance_ton,
                 9
             ),
-
             "fee_ton": round(
                 fee_ton,
                 9
             ),
-
             "ton_price_usd": round(
                 ton_price,
                 6
             ),
-
             "estimated_sent_usd": round(
                 actual_send_ton * ton_price,
                 6
@@ -675,7 +593,7 @@ async def process_payment(req: SendRequest):
 
 
 # =========================================================
-# API ENDPOINT
+# API
 # =========================================================
 
 @app.post("/send")
