@@ -188,6 +188,30 @@ async def track_tx(client, wallet, old_seqno, timeout=150):
 
         try:
 
+            # Wallet deployed first time
+            if old_seqno == -1:
+
+                account_state = await client.get_account_state(
+                    wallet.address
+                )
+
+                if (
+                    account_state
+                    and account_state.is_active
+                ):
+
+                    txs = await client.get_transactions(
+                        wallet.address,
+                        count=5
+                    )
+
+                    if txs:
+                        return txs[0].cell.hash.hex()
+
+                await asyncio.sleep(3)
+
+                continue
+
             seqno = await wallet.get_seqno()
 
             if seqno > old_seqno:
@@ -356,40 +380,101 @@ async def process_payment(req: SendRequest):
     async with wallet_lock:
 
         # =================================================
-        # CHECK AND DEPLOY WALLET IF UNINITIALIZED
+        # CHECK ACCOUNT STATE
         # =================================================
         try:
-            account_state = await client.get_account_state(wallet.address)
-            
-            if account_state.status != "active":
-                print(f"Wallet {wallet_addr} is not active. Deploying contract...")
-                await wallet.deploy()
-                
-                # Give the network a few seconds to process the deployment
-                await asyncio.sleep(5)
-                
+
+            account_state = await client.get_account_state(
+                wallet.address
+            )
+
+            wallet_active = (
+                account_state is not None
+                and account_state.is_active
+            )
+
         except Exception as e:
+
             return response(
                 False,
-                "Wallet state check or deployment failed",
+                "Wallet state check failed",
                 {
                     "error": str(e)
                 },
-                500
+                502
             )
 
         # =================================================
-        # GET SEQNO
+        # DEPLOYMENT GAS BUFFER
+        # =================================================
+        deploy_fee = int(0.05 * 1e9)
+
+        required_total = required
+
+        if not wallet_active:
+            required_total += deploy_fee
+
+        # =================================================
+        # CHECK TOTAL BALANCE
+        # =================================================
+        if before_balance < required_total:
+
+            return response(
+                False,
+                "Insufficient balance for transfer + deployment",
+                {
+                    "wallet": wallet_addr,
+
+                    "balance_ton": round(
+                        balance_ton,
+                        9
+                    ),
+
+                    "required_ton": round(
+                        required_total / 1e9,
+                        9
+                    ),
+
+                    "deploy_required": (
+                        not wallet_active
+                    ),
+
+                    "deploy_fee_ton": round(
+                        deploy_fee / 1e9,
+                        9
+                    )
+                },
+                402
+            )
+
+        # =================================================
+        # GET SEQNO / INIT STATE
         # =================================================
         try:
 
-            old_seqno = await wallet.get_seqno()
+            if wallet_active:
+
+                old_seqno = await wallet.get_seqno()
+
+                state_init = None
+
+            else:
+
+                old_seqno = -1
+
+                init_state_data = (
+                    wallet.create_init_state()
+                )
+
+                state_init = (
+                    init_state_data["init_state"]
+                )
 
         except Exception as e:
 
             return response(
                 False,
-                "Seqno fetch failed",
+                "Wallet prepare failed",
                 {
                     "error": str(e)
                 },
@@ -401,11 +486,28 @@ async def process_payment(req: SendRequest):
         # =================================================
         try:
 
-            await wallet.transfer(
-                destination=req.to_address,
-                amount=required,
-                body=body
-            )
+            if wallet_active:
+
+                await wallet.transfer(
+                    destination=req.to_address,
+                    amount=required,
+                    body=body
+                )
+
+            else:
+
+                await wallet.raw_transfer(
+
+                    msgs=[
+                        wallet.create_wallet_internal_message(
+                            destination=req.to_address,
+                            value=required,
+                            body=body
+                        )
+                    ],
+
+                    state_init=state_init
+                )
 
         except Exception as e:
 
@@ -480,6 +582,10 @@ async def process_payment(req: SendRequest):
                 else "pending"
             ),
 
+            "wallet_deployed": (
+                not wallet_active
+            ),
+
             "amount_ton": round(
                 amount_ton,
                 9
@@ -535,4 +641,3 @@ async def process_payment(req: SendRequest):
 async def send(req: SendRequest):
 
     return await process_payment(req)
-
