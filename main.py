@@ -188,7 +188,7 @@ async def track_tx(client, wallet, old_seqno, timeout=150):
 
         try:
 
-            # Wallet deployed first time
+            # Undeployed wallet tracking
             if old_seqno == -1:
 
                 account_state = await client.get_account_state(
@@ -212,6 +212,7 @@ async def track_tx(client, wallet, old_seqno, timeout=150):
 
                 continue
 
+            # Normal wallet tracking
             seqno = await wallet.get_seqno()
 
             if seqno > old_seqno:
@@ -339,9 +340,60 @@ async def process_payment(req: SendRequest):
     balance_ton = before_balance / 1e9
 
     # =====================================================
+    # DEPLOYMENT FEE
+    # =====================================================
+    deploy_fee = int(0.05 * 1e9)
+
+    # =====================================================
+    # CHECK DEPLOY STATUS
+    # =====================================================
+    try:
+
+        try:
+
+            old_seqno = await wallet.get_seqno()
+
+            wallet_active = True
+
+            state_init = None
+
+        except Exception:
+
+            old_seqno = -1
+
+            wallet_active = False
+
+            init_state_data = (
+                wallet.create_init_state()
+            )
+
+            state_init = (
+                init_state_data["init_state"]
+            )
+
+    except Exception as e:
+
+        return response(
+            False,
+            "Wallet prepare failed",
+            {
+                "error": str(e)
+            },
+            502
+        )
+
+    # =====================================================
+    # REQUIRED TOTAL
+    # =====================================================
+    required_total = required
+
+    if not wallet_active:
+        required_total += deploy_fee
+
+    # =====================================================
     # INSUFFICIENT BALANCE
     # =====================================================
-    if before_balance < required:
+    if before_balance < required_total:
 
         return response(
             False,
@@ -349,21 +401,28 @@ async def process_payment(req: SendRequest):
             {
                 "wallet": wallet_addr,
 
-                "balance_ton": round(balance_ton, 9),
-
-                "balance_usd": round(
-                    balance_ton * ton_price,
-                    6
+                "balance_ton": round(
+                    balance_ton,
+                    9
                 ),
 
                 "required_ton": round(
-                    amount_ton,
+                    required_total / 1e9,
                     9
                 ),
 
                 "required_usd": round(
                     amount_usd,
                     6
+                ),
+
+                "deploy_required": (
+                    not wallet_active
+                ),
+
+                "deploy_fee_ton": round(
+                    deploy_fee / 1e9,
+                    9
                 ),
 
                 "ton_price_usd": round(
@@ -380,134 +439,22 @@ async def process_payment(req: SendRequest):
     async with wallet_lock:
 
         # =================================================
-        # CHECK ACCOUNT STATE
-        # =================================================
-        try:
-
-            account_state = await client.get_account_state(
-                wallet.address
-            )
-
-            wallet_active = (
-                account_state is not None
-                and account_state.is_active
-            )
-
-        except Exception as e:
-
-            return response(
-                False,
-                "Wallet state check failed",
-                {
-                    "error": str(e)
-                },
-                502
-            )
-
-        # =================================================
-        # DEPLOYMENT GAS BUFFER
-        # =================================================
-        deploy_fee = int(0.05 * 1e9)
-
-        required_total = required
-
-        if not wallet_active:
-            required_total += deploy_fee
-
-        # =================================================
-        # CHECK TOTAL BALANCE
-        # =================================================
-        if before_balance < required_total:
-
-            return response(
-                False,
-                "Insufficient balance for transfer + deployment",
-                {
-                    "wallet": wallet_addr,
-
-                    "balance_ton": round(
-                        balance_ton,
-                        9
-                    ),
-
-                    "required_ton": round(
-                        required_total / 1e9,
-                        9
-                    ),
-
-                    "deploy_required": (
-                        not wallet_active
-                    ),
-
-                    "deploy_fee_ton": round(
-                        deploy_fee / 1e9,
-                        9
-                    )
-                },
-                402
-            )
-
-        # =================================================
-        # GET SEQNO / INIT STATE
-        # =================================================
-        try:
-
-            if wallet_active:
-
-                old_seqno = await wallet.get_seqno()
-
-                state_init = None
-
-            else:
-
-                old_seqno = -1
-
-                init_state_data = (
-                    wallet.create_init_state()
-                )
-
-                state_init = (
-                    init_state_data["init_state"]
-                )
-
-        except Exception as e:
-
-            return response(
-                False,
-                "Wallet prepare failed",
-                {
-                    "error": str(e)
-                },
-                502
-            )
-
-        # =================================================
         # SEND TRANSACTION
         # =================================================
         try:
 
-            if wallet_active:
+            await wallet.raw_transfer(
 
-                await wallet.transfer(
-                    destination=req.to_address,
-                    amount=required,
-                    body=body
-                )
+                msgs=[
+                    wallet.create_wallet_internal_message(
+                        destination=req.to_address,
+                        value=required,
+                        body=body
+                    )
+                ],
 
-            else:
-
-                await wallet.raw_transfer(
-
-                    msgs=[
-                        wallet.create_wallet_internal_message(
-                            destination=req.to_address,
-                            value=required,
-                            body=body
-                        )
-                    ],
-
-                    state_init=state_init
-                )
+                state_init=state_init
+            )
 
         except Exception as e:
 
