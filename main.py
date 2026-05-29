@@ -1,3 +1,4 @@
+```python
 import asyncio
 import time
 import requests
@@ -188,7 +189,9 @@ async def track_tx(client, wallet, old_seqno, timeout=150):
 
         try:
 
-            # Undeployed wallet tracking
+            # =============================================
+            # UNDEPLOYED WALLET TRACKING
+            # =============================================
             if old_seqno == -1:
 
                 account_state = await client.get_account_state(
@@ -212,7 +215,9 @@ async def track_tx(client, wallet, old_seqno, timeout=150):
 
                 continue
 
-            # Normal wallet tracking
+            # =============================================
+            # NORMAL WALLET TRACKING
+            # =============================================
             seqno = await wallet.get_seqno()
 
             if seqno > old_seqno:
@@ -363,13 +368,7 @@ async def process_payment(req: SendRequest):
 
             wallet_active = False
 
-            init_state_data = (
-                wallet.create_init_state()
-            )
-
-            state_init = (
-                init_state_data["init_state"]
-            )
+            state_init = wallet.state_init
 
     except Exception as e:
 
@@ -588,3 +587,4 @@ async def process_payment(req: SendRequest):
 async def send(req: SendRequest):
 
     return await process_payment(req)
+```
